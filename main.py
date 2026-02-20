@@ -14,12 +14,12 @@ from enum import Enum
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# --- Constants ---
 AMOUNT_THREADS = os.cpu_count() or 4
 UPDATE_INTERVAL = 50
 DEFAULT_LIMIT = 100
 MAX_RESULTS = 10000
 INCREMENT = 100
+
 
 class Color(Enum):
     WINDOW_BACKGROUND = "#1f1d1d"
@@ -30,7 +30,6 @@ class Color(Enum):
     FOLDER = "#1bbce4"
     RESULT_TEXT = "#1a1a1a"
 
-# --- Watchdog Handler ---
 class IndexUpdateHandler(FileSystemEventHandler):
     def __init__(self, app):
         self.app = app
@@ -127,7 +126,6 @@ class DriveSearchApp:
             self.indexed_total = cursor.fetchone()[0]
             self.conn.commit()
 
-    # --- BATCH SYNC LOGIC ---
     def queue_sync_item(self, path):
         self.watchdog_queue.put(("UPSERT", path))
 
@@ -137,7 +135,7 @@ class DriveSearchApp:
     def database_sync_worker(self):
         """ Background thread that only writes when the app is idle """
         while True:
-            # FIX: If we are searching or indexing, wait to avoid DB contention
+            # wait to avoid DB contention
             if self.indexing or getattr(self, 'is_searching', False):
                 time.sleep(1)
                 continue
@@ -165,8 +163,7 @@ class DriveSearchApp:
                             if not os.path.exists(path): continue
                             is_f = os.path.isfile(path)
                             rtype = "File" if is_f else "Folder"
-                            # We don't use the C helper here for speed; 
-                            # just a quick placeholder for real-time additions
+
                             cursor.execute("INSERT OR REPLACE INTO files (type, path, size_raw, size_display) VALUES (?, ?, ?, ?)", 
                                            (rtype, path, -1, "..."))
                         elif action == "DELETE":
@@ -182,7 +179,7 @@ class DriveSearchApp:
         if self.cancel_op: return -1
         try:
             helper_exe = resource_path("scanner.exe")
-            # FIX: Use .encode('utf-8') so C's MultiByteToWideChar (CP_UTF8) reads it correctly
+            # Using .encode('utf-8') so C's MultiByteToWideChar (CP_UTF8) reads it correctly
             result = subprocess.check_output(
                 [helper_exe, "size", path.encode('utf-8')],
                 creationflags=subprocess.CREATE_NO_WINDOW,
@@ -424,7 +421,7 @@ class DriveSearchApp:
                 search_pattern = f"%{term}%"
                 
                 if folder_context:
-                    # Search ONLY within the specific folder context
+                    # Search only within the specific folder context
                     # Path must start with folder_context AND contain the term
                     folder_pattern = f"{folder_context}%"
                     query = "SELECT type, size_display, path, size_raw FROM files WHERE path LIKE ? AND path LIKE ? LIMIT ?"
@@ -532,7 +529,7 @@ class DriveSearchApp:
         priority = self.type_filter.get()
         
         with self.lock:
-            # Step 1: Primary Sort
+            # Primary Sort
             if mode == "Relevance":
                 self.all_results.sort(key=lambda x: (self.score(x[2], self.last_term), x[2].lower()))
             elif mode == "Name (A-Z)":
@@ -544,7 +541,7 @@ class DriveSearchApp:
             elif mode == "Size (Small)":
                 self.all_results.sort(key=lambda x: (x[3] == -1, x[3]))
 
-            # Step 2: Secondary Priority Filter
+            # Secondary Priority Filter
             if priority == "Files First":
                 self.all_results.sort(key=lambda x: (x[0] != "File"))
             elif priority == "Folders First":
@@ -694,12 +691,11 @@ if __name__ == "__main__":
 
     center_on_cursor(root, 1100, 750)
 
-    # Check for command line arguments
     initial_term = ""
     initial_path = None
     
     argv = sys.argv
-    # If triggered via 'sch keyword', sys.argv[1] will be the keyword
+
     if len(sys.argv) > 1:
         initial_term = sys.argv[1]
         # File Explorer passes the current folder as the Working Directory

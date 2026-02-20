@@ -161,7 +161,6 @@ void prune_database(sqlite3 *db) {
 int main(int argc, char *argv[]) {
     if (argc < 3) return 1;
 
-    // --- MODE 1: SIZE CALCULATION ---
     if (strcmp(argv[1], "size") == 0) {
         wchar_t pathW[MAX_PATH];
         // Ensure we handle wide paths properly even if they are long
@@ -174,22 +173,19 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    // --- MODE 2: INDEXING ---
     const char *drive_a = argv[1];
     const char *db_path = argv[2];
 
     wchar_t drive_w[MAX_PATH];
     MultiByteToWideChar(CP_UTF8, 0, drive_a, -1, drive_w, MAX_PATH);
 
-    // Phase 1: Count
     fast_count(drive_w);
     printf("FINAL_COUNT|%lld\n", global_count);
     fflush(stdout);
 
-    // Phase 2: Index
     if (sqlite3_open(db_path, &db) != SQLITE_OK) return 1;
     
-    // FIX: Match Python's concurrency settings
+    // Match Python's concurrency settings
     sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL); 
     sqlite3_busy_timeout(db, 2000); // Wait up to 2s if Python is searching
@@ -198,7 +194,6 @@ int main(int argc, char *argv[]) {
     sqlite3_exec(db, "PRAGMA cache_size=-64000;", NULL, NULL, NULL);
     sqlite3_exec(db, "BEGIN TRANSACTION;", NULL, NULL, NULL);
     
-    // Ensure the query matches your table structure
     sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO files (type, path, size_raw, size_display) VALUES (?, ?, ?, ?)", -1, &stmt, NULL);
     
     global_count = 0; 
@@ -207,7 +202,6 @@ int main(int argc, char *argv[]) {
     sqlite3_finalize(stmt);
     sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
 
-    // Phase 3: Prune
     prune_database(db);
 
     sqlite3_close(db);
