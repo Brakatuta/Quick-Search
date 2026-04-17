@@ -412,25 +412,28 @@ class DriveSearchApp:
 
     def run_hybrid_search(self, drive, term, limit, folder_context=None):
         # Prevent the worker crash by flagging search state
-        self.is_searching = True 
+        self.is_searching = True
+        rows = []
+        db_has_index = False
         try:
             with self.lock:
                 cursor = self.conn.cursor()
                 cursor.execute("PRAGMA busy_timeout = 2000")
-                
+
+                # Check whether the index actually contains data for this drive
+                cursor.execute("SELECT COUNT(*) FROM files")
+                db_has_index = cursor.fetchone()[0] > 0
+
                 search_pattern = f"%{term}%"
-                
+
                 if folder_context:
-                    # Search only within the specific folder context
-                    # Path must start with folder_context AND contain the term
                     folder_pattern = f"{folder_context}%"
                     query = "SELECT type, size_display, path, size_raw FROM files WHERE path LIKE ? AND path LIKE ? LIMIT ?"
                     cursor.execute(query, (folder_pattern, search_pattern, limit))
                 else:
-                    # Global drive search
                     query = "SELECT type, size_display, path, size_raw FROM files WHERE path LIKE ? LIMIT ?"
                     cursor.execute(query, (search_pattern, limit))
-                
+
                 rows = cursor.fetchall()
         except Exception as e:
             print(f"Search error: {e}")
@@ -441,26 +444,33 @@ class DriveSearchApp:
         if rows:
             with self.lock:
                 self.all_results = [list(r) for r in rows]
-            
-            # Apply sorting/filtering (Files first/Folders first etc)
+
+            # Apply sorting/filtering
             self.apply_manual_sort()
-            
-            # Start folder sizing for results
-            for i, row in enumerate(self.all_results):
+
+            # Start folder sizing for DB results that have no real size yet
+            for row in self.all_results:
                 if row[0] == "Folder":
-                    # Use path-based sizing to avoid the index race condition
                     self.executor.submit(self.async_folder_size, row[2], row[2])
-            
+
             self.root.after(0, lambda: self.search_button.config(text="Search"))
+
+            # Even when the index had results, do an additional live scan to catch
+            # anything the index may have missed (new files, recently moved items, etc.)
+            if db_has_index:
+                start_dir = folder_context if folder_context else f"{drive}:\\"
+                self.root.after(0, lambda: self.status_label.config(
+                    text=f"{len(rows)} index results – scanning for more..."))
+                self.run_live_scan(start_dir, term, limit)
         else:
-            # If nothing in DB, fall back to live scan of that specific folder
+            # No index or no hits → classic live scan
             start_dir = folder_context if folder_context else f"{drive}:\\"
             self.run_live_scan(start_dir, term, limit)
 
-    def async_folder_size(self, _, path): # Discard the index, use path
+    def async_folder_size(self, path, _path_ignored=None):
+        """Calculate folder size asynchronously and push an UPDATE to the results queue."""
         size = self.get_folder_size(path)
         disp = self.format_size(size)
-        # Pass the path as the identifier
         self.results_queue.put(("UPDATE", path, disp, size))
 
     def process_queue(self):
@@ -503,7 +513,7 @@ class DriveSearchApp:
             return -1
 
     def format_size(self, size_bytes):
-        if size_bytes < 0: return "..."
+        if size_bytes is None or size_bytes < 0: return "..."
         for unit in ['B', 'KB', 'MB', 'GB']:
             if size_bytes < 1024: return f"{size_bytes:.1f}{unit}"
             size_bytes /= 1024
@@ -583,6 +593,7 @@ class DriveSearchApp:
                 if os.path.isdir(full_path): self.executor.submit(self.live_scan_worker, full_path, term, limit)
                 elif term.lower() in item.lower(): self.add_live_result("File", full_path)
         except: pass
+        self.root.after(0, lambda: self.search_button.config(text="Search"))
 
     def live_scan_worker(self, path, term, limit):
         term_lower = term.lower()
@@ -607,10 +618,18 @@ class DriveSearchApp:
                                 res = [rtype, disp_size, entry.path, raw_size]
                                 with self.lock:
                                     if len(self.all_results) < limit:
-                                        idx = len(self.all_results)
+                                        # Skip duplicates already found via the DB index
+                                        existing_paths = {r[2] for r in self.all_results}
+                                        if entry.path in existing_paths:
+                                            # Update size if the DB had -- / ... for this folder
+                                            if not is_file:
+                                                self.executor.submit(self.async_folder_size, entry.path, entry.path)
+                                            continue
                                         self.all_results.append(res)
-                                        self.results_queue.put((idx, res))
-                                        if not is_file: self.executor.submit(self.async_folder_size, idx, entry.path)
+                                        self.results_queue.put((len(self.all_results) - 1, res))
+                                        # Use path as key (consistent with process_queue UPDATE handler)
+                                        if not is_file:
+                                            self.executor.submit(self.async_folder_size, entry.path, entry.path)
                             except: continue
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(entry.path)
@@ -623,9 +642,10 @@ class DriveSearchApp:
             disp_size = self.format_size(raw_size)
             res = [rtype, disp_size, rpath, raw_size]
             with self.lock:
-                idx = len(self.all_results)
                 self.all_results.append(res)
-            self.results_queue.put((idx, res))
+                self.results_queue.put((len(self.all_results) - 1, res))
+            if rtype == "Folder":
+                self.executor.submit(self.async_folder_size, rpath, rpath)
         except: pass
 
     def get_available_drives(self):
